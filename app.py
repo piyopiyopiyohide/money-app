@@ -13,11 +13,11 @@ try:
     # Secretsの情報を辞書型にまとめる
     creds_dict = {
         "type": "service_account",
-        "project_id": "hi-friends-money", # ダミーでも動くことが多いですが設定推奨
+        "project_id": "hi-friends-money", 
         "private_key_id": st.secrets["PRIVATE_KEY_ID"],
         "private_key": st.secrets["PRIVATE_KEY"],
         "client_email": st.secrets["CLIENT_EMAIL"],
-        "client_id": "12345", # ダミー
+        "client_id": "12345",
         "auth_uri": "https://accounts.google.com/o/oauth2/auth",
         "token_uri": "https://oauth2.googleapis.com/token",
         "auth_provider_x509_cert_url": "https://www.googleapis.com/oauth2/v1/certs",
@@ -95,7 +95,7 @@ if new_lender_name != st.session_state.lender_name:
     st.rerun()
 
 st.sidebar.markdown("---")
-# 2. 借り手の名前変更（表示名だけの一時変更。過去ログ書き換えは複雑になるため簡易版）
+# 2. 借り手の名前変更
 st.sidebar.subheader("借りている人の名前")
 st.sidebar.caption("※名前を変えても過去の履歴の名前は変わりません")
 for i, old_name in enumerate(st.session_state.users):
@@ -114,8 +114,7 @@ if st.sidebar.button("追加"):
 st.sidebar.markdown("---")
 st.sidebar.subheader("修正・データ管理")
 
-# Googleシート版では「1つ戻る」の実装が難しいため（行削除APIが必要）、
-# 「最新の履歴を1件削除」ボタンにします
+# 最新の履歴を1件削除
 if st.sidebar.button("🗑️ 最新の履歴を1件削除"):
     all_values = sheet.get_all_values()
     if len(all_values) > 1: # ヘッダー以外にデータがある場合
@@ -246,68 +245,4 @@ if not history_df.empty:
     history_df = history_df[['日時', '対象者', 'タイプ', '金額', '取引後残高', 'メモ']]
     st.dataframe(history_df, use_container_width=True)
 else:
-    st.write("履歴はまだありません。")with tab1:
-    with st.form("borrow_form", clear_on_submit=True):
-        target_users = st.multiselect("対象者", st.session_state.users, default=st.session_state.users)
-        amount_total = st.number_input("金額", min_value=0, step=100)
-        split_method = st.radio("入力方法", ["全員にこの金額を追加", "合計金額を全員で割る"])
-        desc_borrow = st.text_input("内容", "割り勘")
-        if st.form_submit_button("登録"):
-            if target_users and amount_total > 0:
-                amount_per = int(amount_total / len(target_users)) if split_method == "合計金額を全員で割る" else amount_total
-                new_entries = pd.DataFrame([{
-                    '日時': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    'タイプ': '借入', '対象者': user, '金額': amount_per, 'メモ': desc_borrow
-                } for user in target_users])
-                st.session_state.transactions = pd.concat([st.session_state.transactions, new_entries], ignore_index=True)
-                st.rerun()
-
-with tab2:
-    with st.form("repay_form", clear_on_submit=True):
-        payer = st.selectbox("返済する人", st.session_state.users)
-        amount_repay = st.number_input("返済額", min_value=0, step=100)
-        desc_repay = st.text_input("メモ", "現金返済")
-        if st.form_submit_button("返済を記録"):
-            if amount_repay > 0:
-                entry = pd.DataFrame([{'日時': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-                    'タイプ': '返済', '対象者': payer, '金額': -amount_repay, 'メモ': desc_repay}])
-                st.session_state.transactions = pd.concat([st.session_state.transactions, entry], ignore_index=True)
-                st.rerun()
-
-with tab3:
-    st.caption("例：BさんがCさんの分を払ってあげた場合など、借金の付け替えを行います。")
-    with st.form("transfer_form", clear_on_submit=True):
-        taker = st.selectbox("お金を渡した人 (借金が増える)", st.session_state.users)
-        reducer = st.selectbox("お金をもらった人 (借金が減る)", st.session_state.users)
-        amt = st.number_input("移動金額", min_value=0, step=100)
-        # 【新機能】理由入力欄
-        reason = st.text_input("移動の理由", placeholder="ランチ代の立て替え、など")
-        
-        if st.form_submit_button("数値移動を実行"):
-            if amt > 0 and taker != reducer:
-                # 理由が空の場合は自動で補完
-                memo_taker = f"{reducer}への支払い" + (f" ({reason})" if reason else "")
-                memo_reducer = f"{taker}からの受取" + (f" ({reason})" if reason else "")
-
-                entries = pd.DataFrame([
-                    {'日時': datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'タイプ': '移動(+)', '対象者': taker, '金額': amt, 'メモ': memo_taker},
-                    {'日時': datetime.now().strftime('%Y-%m-%d %H:%M:%S'), 'タイプ': '移動(-)', '対象者': reducer, '金額': -amt, 'メモ': memo_reducer}
-                ])
-                st.session_state.transactions = pd.concat([st.session_state.transactions, entries], ignore_index=True)
-                st.rerun()
-
-# --- 履歴表示（取引後残高付き） ---
-st.markdown("---")
-st.subheader("📜 取引履歴 (最新順)")
-history_df = get_history_with_balance()
-
-if not history_df.empty:
-    history_df = history_df[['日時', '対象者', 'タイプ', '金額', '取引後残高', 'メモ']]
-    st.dataframe(history_df, use_container_width=True)
-else:
     st.write("履歴はまだありません。")
-
-# CSV保存
-csv = st.session_state.transactions.to_csv(index=False).encode('utf-8-sig')
-
-st.download_button("履歴をCSV保存", data=csv, file_name='debt_history.csv', mime='text/csv')

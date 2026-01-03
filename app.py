@@ -6,11 +6,9 @@ import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 
 # --- Google Sheets 接続設定 ---
-# Secretsから情報を取得
 try:
     scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
     
-    # Secretsの情報を辞書型にまとめる
     creds_dict = {
         "type": "service_account",
         "project_id": "hi-friends-money", 
@@ -27,7 +25,14 @@ try:
     creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
     client = gspread.authorize(creds)
     sheet_url = st.secrets["SHEET_URL"]
-    sheet = client.open_by_url(sheet_url).sheet1 # 1枚目のシートを使う
+    
+    # シートの取得（データ用と設定用）
+    sheet_trans = client.open_by_url(sheet_url).sheet1
+    try:
+        sheet_settings = client.open_by_url(sheet_url).worksheet('settings')
+    except gspread.exceptions.WorksheetNotFound:
+        st.error("エラー: スプレッドシートに 'settings' という名前のシートが見つかりません。作成してください。")
+        st.stop()
 
 except Exception as e:
     st.error(f"Googleスプレッドシートへの接続に失敗しました: {e}")
@@ -35,15 +40,14 @@ except Exception as e:
 
 # --- データ読み書き関数 ---
 def load_data():
-    # スプレッドシートから全データを取得
-    data = sheet.get_all_records()
+    data = sheet_trans.get_all_records()
     if not data:
         return pd.DataFrame(columns=['日時', 'タイプ', '対象者', '金額', 'メモ'])
+    # 全て文字列として読み込まれるのを防ぐため型変換などはPandasに任せるが、
+    # 空行などへの対策としてDataFrame化
     return pd.DataFrame(data)
 
 def save_record(record_dict):
-    # スプレッドシートの末尾に1行追加
-    # record_dictの順番を固定する
     row = [
         record_dict['日時'],
         record_dict['タイプ'],
@@ -51,16 +55,42 @@ def save_record(record_dict):
         record_dict['金額'],
         record_dict['メモ']
     ]
-    sheet.append_row(row)
+    sheet_trans.append_row(row)
 
-# --- 初期設定 ---
+def load_settings():
+    # settingsシートから設定を読み込む
+    records = sheet_settings.get_all_records()
+    setting_dict = {r['key']: r['value'] for r in records}
+    
+    lender = setting_dict.get('lender', 'Aさん')
+    members_str = setting_dict.get('members', '自分(B),友達(C)')
+    # 文字列のカンマ区切りをリストに戻す（空文字対策も含む）
+    members = [m.strip() for m in str(members_str).split(',') if m.strip()]
+    
+    return lender, members
+
+def update_settings(key, value):
+    # スプレッドシートの値を更新する
+    try:
+        cell = sheet_settings.find(key)
+        sheet_settings.update_cell(cell.row, cell.col + 1, value)
+    except:
+        st.warning(f"設定 {key} の保存に失敗しました。")
+
+# --- 初期化と設定ロード ---
+if 'init_done' not in st.session_state:
+    lender_loaded, members_loaded = load_settings()
+    st.session_state.lender_name = lender_loaded
+    st.session_state.users = members_loaded
+    st.session_state.init_done = True
+
+# 念のためセッションステートが無い場合のガード
 if 'users' not in st.session_state:
     st.session_state.users = ["自分(B)", "友達(C)"]
 if 'lender_name' not in st.session_state:
     st.session_state.lender_name = "Aさん"
 
-# --- データをロード ---
-# アプリを開くたびに最新をシートから取ってくる
+# 取引データロード
 df_trans = load_data()
 
 # --- 関数：履歴に「取引後残高」を計算して付与する ---
@@ -76,6 +106,7 @@ def get_history_with_balance(df):
     
     for _, row in df.iterrows():
         name = row['対象者']
+        # メンバーリストにない名前が履歴にある場合の対応
         if name not in current_balances:
             current_balances[name] = 0
         current_balances[name] += row['金額']
@@ -92,16 +123,22 @@ st.sidebar.subheader("貸している人の名前")
 new_lender_name = st.sidebar.text_input("貸し手 (ハブ役)", value=st.session_state.lender_name)
 if new_lender_name != st.session_state.lender_name:
     st.session_state.lender_name = new_lender_name
+    update_settings('lender', new_lender_name) # シートに保存
     st.rerun()
 
 st.sidebar.markdown("---")
 # 2. 借り手の名前変更
 st.sidebar.subheader("借りている人の名前")
-st.sidebar.caption("※名前を変えても過去の履歴の名前は変わりません")
+st.sidebar.caption("※名前を変更すると、次回からその名前で記録されます。")
+
+# メンバー名の変更処理
 for i, old_name in enumerate(st.session_state.users):
     new_name = st.sidebar.text_input(f"メンバー {i+1}", value=old_name, key=f"user_input_{i}")
     if new_name != old_name:
         st.session_state.users[i] = new_name
+        # リストをカンマ区切りの文字列にして保存
+        members_str = ",".join(st.session_state.users)
+        update_settings('members', members_str) # シートに保存
         st.rerun()
 
 # メンバー追加
@@ -109,6 +146,8 @@ new_member = st.sidebar.text_input("新規メンバー追加")
 if st.sidebar.button("追加"):
     if new_member and new_member not in st.session_state.users:
         st.session_state.users.append(new_member)
+        members_str = ",".join(st.session_state.users)
+        update_settings('members', members_str) # シートに保存
         st.rerun()
 
 st.sidebar.markdown("---")
@@ -116,11 +155,11 @@ st.sidebar.subheader("修正・データ管理")
 
 # 最新の履歴を1件削除
 if st.sidebar.button("🗑️ 最新の履歴を1件削除"):
-    all_values = sheet.get_all_values()
+    all_values = sheet_trans.get_all_values()
     if len(all_values) > 1: # ヘッダー以外にデータがある場合
         last_row_index = len(all_values)
-        sheet.delete_rows(last_row_index)
-        st.sidebar.success("最新の1行をスプレッドシートから削除しました。")
+        sheet_trans.delete_rows(last_row_index)
+        st.sidebar.success("最新の1行を削除しました。")
         st.rerun()
     else:
         st.sidebar.warning("削除するデータがありません。")
@@ -153,7 +192,7 @@ if st.sidebar.button("💰 今の借金をすべて0にする (清算)"):
 # --- メインエリア ---
 lender = st.session_state.lender_name
 st.title(f"💰 {lender} 経由の借金管理")
-st.caption("☁️ Googleスプレッドシート連携中")
+st.caption("☁️ Googleスプレッドシート完全連携中")
 
 # 現在の状況計算
 balance = {user: 0 for user in st.session_state.users}
@@ -168,7 +207,7 @@ total_lent = df_balance['借金残高'].sum()
 # 合計表示
 col1, col2 = st.columns(2)
 col1.metric(f"{lender} が貸している総額", f"{total_lent:,} 円")
-col2.info("入力したデータは自動的にGoogleスプレッドシートに保存されます。")
+col2.info("名前を変更しても、ちゃんと保存されるようになりました！")
 
 # グラフ表示
 if total_lent != 0:
